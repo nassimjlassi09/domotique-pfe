@@ -1,0 +1,182 @@
+#include <LiquidCrystal.h>     // Bibliothèque pour l'écran LCD
+#include <Keypad.h>            // Bibliothèque pour le clavier matriciel
+
+// Configuration LCD : RS,E,D4,D5,D6,D7
+LiquidCrystal lcd(13,12,11,10,9,8);
+
+// Déclaration des sorties
+const int RedLED = 5;
+const int GreenLED = 6;
+const int Buzzer = 7;
+
+// Variables utilisées pour RFID
+char c;// Stocke un caractère reçu
+String id="";// Stocke l'identifiant RFID complet
+char a,b,c1,d;// Variables utilisées pour le clavier
+
+// Nombre de lignes et colonnes du clavier
+const byte ROWS = 4;
+const byte COLS = 3;
+char clavier[ROWS][COLS]={
+{'1','2','3'},
+{'4','5','6'},
+{'7','8','9'},
+{'*','0','#'}
+};
+// Connexion physique du clavier avec Arduino
+byte rowPins[ROWS]={4,3,2,A3};
+byte colPins[COLS]={A0,A1,A2};
+// Création de l'objet clavier
+Keypad keypad=Keypad(
+makeKeymap(clavier),
+rowPins,
+colPins,
+ROWS,
+COLS
+);
+
+// Fonction exécutée lorsque l'accès est accepté
+void accessOK()
+{
+    lcd.clear();
+    lcd.setCursor(2,0);
+    lcd.print("Acces OK");
+    lcd.setCursor(0,1);
+    lcd.print("Vous pouvez");
+    lcd.setCursor(3,2);
+    lcd.print("entrer");
+    digitalWrite(GreenLED,HIGH);
+    digitalWrite(Buzzer,LOW);
+    delay(5000);
+    digitalWrite(GreenLED,LOW);
+    lcd.clear();// Retour écran principal
+    lcd.setCursor(0,0);
+    lcd.print("Entrez code:");
+}
+
+// Fonction exécutée lorsque accès refusé
+void accessNO()
+{
+    lcd.clear();
+    lcd.setCursor(1,0);
+    lcd.print("Code Faux");
+    lcd.setCursor(0,1);
+    lcd.print("Acces refuse");
+    digitalWrite(RedLED,HIGH);
+    digitalWrite(Buzzer,HIGH);
+    delay(1500);
+    digitalWrite(Buzzer,LOW);
+    delay(2000);
+    digitalWrite(RedLED,LOW);
+    lcd.clear();// Retour écran initial
+    lcd.setCursor(0,0);
+    lcd.print("Entrez code:");
+}
+
+void setup()
+{
+ // Initialisation communication série RFID
+ Serial.begin(9600);
+
+ // Définition broches sortie
+ pinMode(RedLED,OUTPUT);
+ pinMode(GreenLED,OUTPUT);
+ pinMode(Buzzer,OUTPUT);
+
+ digitalWrite(Buzzer,LOW); // Buzzer OFF au démarrage
+
+ lcd.begin(20,4);
+ // Message de départ
+ lcd.setCursor(0,0);
+ lcd.print("Entrez code:");
+}
+
+//  PARTIE RFID
+void loop()
+{
+while(Serial.available())
+{
+ c=Serial.read(); // Lire caractère reçu
+
+ // Ignorer retour ligne
+ if(c!='\n' && c!='\r')
+ {
+    id+=c;
+ }
+
+ // Si longueur RFID=12
+ if(id.length()==12)
+ {
+ id.trim();
+ // Vérification des cartes autorisées
+ if(id=="E280689401A9" ||
+    id=="E2000019060C" ||
+    id=="G46RD9V40F3A" ||
+    id=="B71001B76894" ||
+    id=="1C81159073FD" ||
+    id=="B710D0186022")
+ {
+    accessOK();
+ }
+ else
+ {
+    accessNO();
+ }
+
+ // Vider mémoire RFID
+ id="";
+
+ while(Serial.available())
+ {
+   Serial.read();
+ }
+ }
+}
+
+//  Partie clavier
+lcd.cursor();
+
+a=keypad.getKey();
+
+if(a!=NO_KEY)
+{
+
+// Premier chiffre
+lcd.setCursor(0,2);
+lcd.print("*");
+
+b=NO_KEY;
+while(b==NO_KEY)
+b=keypad.getKey();
+
+// Deuxième chiffre
+lcd.setCursor(1,2);
+lcd.print("*");
+
+c1=NO_KEY;
+while(c1==NO_KEY)
+c1=keypad.getKey();
+
+// Troisième chiffre
+lcd.setCursor(2,2);
+lcd.print("*");
+
+d=NO_KEY;
+while(d==NO_KEY)
+d=keypad.getKey();
+
+// Quatrième chiffre
+lcd.setCursor(3,2);
+lcd.print("*");
+
+// Vérification du mot de passe
+if(a=='1' && b=='2' && c1=='3' && d=='4')
+{
+accessOK();
+}
+else
+{
+accessNO();
+}
+}
+}
