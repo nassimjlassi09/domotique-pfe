@@ -1,0 +1,187 @@
+#include <LiquidCrystal.h>   // Bibliothèque pour contrôler l'écran LCD
+#include <SoftwareSerial.h>  // Bibliothèque pour la communication série avec le module GSM
+
+// Initialisation du LCD sur les broches (RS=2, EN=3, D4=4, D5=5, D6=6, D7=7)
+LiquidCrystal lcd(2, 3, 4, 5, 6, 7);
+
+const int sensorPin = A0;  // Broche du capteur de gaz MQ-5
+const int buzzer = 13;
+const int G_led = 8;
+const int R_led = 9;
+
+int read_value = 0;  // Variable pour stocker la valeur lue du capteur
+bool lastGasState = false; // Variable utilisée pour mémoriser l’état précédent du gaz
+
+// Communication série logicielle avec le module GSM
+SoftwareSerial gsm(11, 10);// RX = Broche 11, TX = Broche 10
+
+const String PHONE_NUMBER = "+1234567890";  // Numéro de téléphone qui reçoit les alertes SMS
+
+bool smsSent = false;         // Empêche l’envoi de plusieurs SMS pour une seule détection
+bool smsInProgress = false;   // Indique qu’un SMS est en cours d’envoi
+unsigned long smsStepStart = 0; // Variable utilisée pour gérer le temps entre les étapes d’envoi
+int smsStep = 0;              // Variable indiquant l’étape actuelle de la machine d’état SMS
+
+void setup() {
+  Serial.begin(9600);  // Démarrage de la communication série
+  Serial.println(F("Gas Detector - Fast Response Mode"));
+
+  gsm.begin(9600);     // Démarrage de la communication avec le module GSM
+
+  // Configuration des broches en entrée ou sortie
+  pinMode(sensorPin, INPUT);
+  pinMode(buzzer, OUTPUT);
+  pinMode(R_led, OUTPUT);
+  pinMode(G_led, OUTPUT);
+
+  // État initial du système : fonctionnement normal
+  digitalWrite(buzzer, LOW);
+  digitalWrite(R_led, LOW);
+  digitalWrite(G_led, HIGH);
+
+  // Initialisation de l’écran LCD
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("   WELCOME To   "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("  Gas Detector  "));
+  delay(2000);
+  lcd.clear();
+
+  // Affichage du démarrage du module GSM
+  Serial.println(F("GSM Init..."));
+  lcd.setCursor(0, 0);
+  lcd.print(F("GSM Init...     "));
+
+  initializeGSMBlind(); // Initialisation du module GSM
+  lcd.setCursor(0, 1);
+  lcd.print(F("GSM Ready       "));
+  Serial.println(F("Ready."));
+  delay(1000);
+  lcd.clear();
+}
+
+void loop() {
+  read_value = digitalRead(sensorPin);// Lecture continue de l’état du capteur de gaz
+  bool currentGas = (read_value == 1);// Vérification si du gaz est détecté
+
+  // Cas : gaz détecté
+  if (currentGas && !lastGasState) {
+    // Activation des dispositifs d’alarme
+    digitalWrite(buzzer, HIGH);
+    digitalWrite(R_led, HIGH); 
+    digitalWrite(G_led, LOW); 
+    // Affichage du message d’alerte sur le LCD
+    lcd.setCursor(0, 0);
+    lcd.print(F(" Gas Detected!  "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Alert....!!!    "));
+    // Démarrage de la séquence d’envoi SMS
+    if (!smsSent && !smsInProgress) {
+      smsInProgress = true;
+      smsStep = 0;
+      Serial.println(F("Gas detected - Starting SMS sequence"));
+    }
+    lastGasState = true;// Sauvegarde de l’état actuel
+  }
+
+  // Cas : disparition du gaz
+  if (!currentGas && lastGasState) {
+    // Retour à l’état normal
+    digitalWrite(buzzer, LOW);
+    digitalWrite(R_led, LOW);  
+    digitalWrite(G_led, HIGH); 
+    // Affichage du mode normal sur le LCD
+    lcd.setCursor(0, 0);
+    lcd.print(F("   Air Clear    "));
+    lcd.setCursor(0, 1);
+    lcd.print(F(".....Normal....."));
+
+    // Réinitialisation pour permettre un nouvel envoi SMS
+    smsSent = false;
+    lastGasState = false;
+  }
+  // Gestion de la machine d’état d’envoi SMS
+  if (smsInProgress) {
+    handleSMSStateMachine();
+  }
+  delay(50); // Petit délai pour stabiliser la lecture du capteur
+}
+
+// Fonction d’initialisation du module GSM
+void initializeGSMBlind() {
+  delay(3000); // Temps nécessaire au démarrage du module GSM
+  gsm.println("AT"); // Vérification de la communication GSM
+  delay(500);
+  gsm.println("ATE0"); // Désactivation de l’écho
+  delay(500);
+  gsm.println("AT+CMGF=1"); // Configuration du mode texte SMS
+  delay(500);
+}
+
+// Fonction de gestion de l’envoi SMS par étapes
+void handleSMSStateMachine() {
+  switch (smsStep) {
+    case 0:
+      gsm.println("AT+CMGF=1"); // Configuration du mode texte
+      smsStepStart = millis();
+      smsStep = 1;
+      break;
+    case 1:
+      // Attente de 500 ms
+      if (millis() - smsStepStart >= 500) {
+        smsStep = 2;
+      }
+      break;
+    case 2:
+      // Envoi de la commande du numéro destinataire
+      gsm.print("AT+CMGS=\"");
+      gsm.print(PHONE_NUMBER);
+      gsm.println("\"");
+      smsStepStart = millis();
+      smsStep = 3;
+      break;
+    case 3:
+      // Attente de la réponse du module GSM
+      if (millis() - smsStepStart >= 500) {
+        smsStep = 4;
+      }
+      break;
+    case 4:
+      // Envoi du contenu du SMS
+      gsm.print("Alert! Gas detected by your alarm system.");
+      smsStepStart = millis();
+      smsStep = 5;
+      break;
+    case 5:
+      // Attente avant l’envoi final
+      if (millis() - smsStepStart >= 500) {
+        smsStep = 6;
+      }
+      break;
+    case 6:
+      // Envoi du caractère Ctrl+Z pour transmettre le SMS
+      gsm.write(26);
+      smsStepStart = millis();
+      smsStep = 7;
+      lcd.setCursor(0, 1);
+      lcd.print(F("Sending SMS...  "));
+      break;
+    case 7:
+      // Attente de la confirmation d’envoi
+      if (millis() - smsStepStart >= 5000) {
+        smsStep = 8;
+      }
+      break;
+    case 8:
+      // Confirmation de la fin de l’envoi
+      Serial.println(F("SMS sequence complete."));
+      lcd.setCursor(0, 1);
+      lcd.print(F("SMS Sent!       "));
+      smsSent = true; // SMS marqué comme envoyé
+      smsInProgress = false; // Fin du processus d’envoi
+      smsStep = 0; // Réinitialisation de la machine d’état
+      break;
+  }
+}
