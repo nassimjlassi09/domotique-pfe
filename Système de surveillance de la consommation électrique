@@ -1,0 +1,150 @@
+const float VOLTAGE = 400 ;
+
+// ===== STORAGE =====
+float energy3[4];     // 4 periods = 1 year
+float cost3[4];
+
+float energy6[2];
+float cost6[2];
+
+// ===== INDEX =====
+int periodIndex = 0;
+
+// ===== TIMING =====
+unsigned long lastPeriod = 0;
+const unsigned long periodTime = 30000; // 30 sec = 3 months
+
+int year = 2026;
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(9600);
+  randomSeed(analogRead(A0));
+
+  Serial.println("===========================================");
+  Serial.println("   ELECTRONIC FACTORY ENERGY MONITOR");
+  Serial.println("===========================================");
+}
+
+// ===== FUNCTION: simulate 3 months =====
+void simulate3Months(int idx)
+{
+  // ===== TIME =====
+  float hoursPerDay = random(50, 80) / 10.0; // 5–8 hours
+  float totalHours = hoursPerDay * 60;       // 60 days
+
+  // ===== CURRENT =====
+  float baseCurrent = 48;                   // machine typical
+  float variation = random(-1200, 1200) / 100.0; // ±0.3A
+  float current = baseCurrent + variation;
+
+  if (current < 0) current = 0;
+
+  // ===== POWER =====
+  float power = VOLTAGE * current;  // Watts
+
+  // ===== ENERGY =====
+  float energy = power * totalHours; // Wh
+
+  // ===== PRODUCTION =====
+  float production = random(80000, 120000);
+
+  // ===== COST PER UNIT =====
+  float cost = energy / (production + 1);
+
+  energy3[idx] = energy;
+  cost3[idx] = cost;
+
+  // ===== DISPLAY =====
+  String names[4] = {
+    "January - February - March",
+    "April - May - June",
+    "July - August - September",
+    "October - November - December"
+  };
+
+  Serial.println("\n===========================================");
+  Serial.print(names[idx]);
+  Serial.print(" ");
+  Serial.println(year);
+  Serial.println("-------------------------------------------");
+
+  Serial.print("Power Used: "); Serial.print(power); Serial.println(" W");
+  Serial.print("Time Worked: "); Serial.print(totalHours); Serial.println(" h");
+  Serial.print("Energy Consumed: "); Serial.print(energy); Serial.println(" Wh");
+  Serial.print("Cards Produced: "); Serial.println(production);
+  Serial.print("Cost per Unit: "); Serial.print(cost); Serial.println(" Wh/PCB");
+
+  // ===== 3-MONTH COMPARISON =====
+  if (idx > 0)
+  {
+    float diffE = ((energy3[idx] - energy3[idx - 1]) / energy3[idx - 1]) * 100;
+    float diffC = ((cost3[idx] - cost3[idx - 1]) / cost3[idx - 1]) * 100;
+
+    Serial.println("\n--- Comparison with previous 3 months ---");
+    Serial.print("Energy difference: "); Serial.print(diffE); Serial.println(" %");
+    Serial.print("Cost difference: "); Serial.print(diffC); Serial.println(" %");
+
+    if (diffC >= 10)
+      Serial.println("Status: HIGHER CONSUMPTION");
+    else
+      Serial.println("Status: GOOD CONSUMPTION");
+  }
+}
+
+// ===== LOOP =====
+void loop()
+{
+  if (millis() - lastPeriod >= periodTime)
+  {
+    simulate3Months(periodIndex);
+
+    // ===== BUILD 6 MONTHS =====
+    if (periodIndex % 2 == 1)
+    {
+      int i = periodIndex / 2;
+
+      energy6[i] = energy3[periodIndex] + energy3[periodIndex - 1];
+      cost6[i] = cost3[periodIndex] + cost3[periodIndex - 1];
+
+      Serial.println("\n=========== 6 MONTHS SUMMARY ===========");
+
+      Serial.print("Period: ");
+      if (i == 0) Serial.println("January - June");
+      else Serial.println("July - December");
+
+      Serial.print("Energy: "); Serial.println(energy6[i]);
+      Serial.print("Cost: "); Serial.println(cost6[i]);
+
+      if (i > 0)
+      {
+        float diffE = ((energy6[i] - energy6[i - 1]) / energy6[i - 1]) * 100;
+        float diffC = ((cost6[i] - cost6[i - 1]) / cost6[i - 1]) * 100;
+
+        Serial.println("\n--- Comparison with previous 6 months ---");
+        Serial.print("Energy difference: "); Serial.print(diffE); Serial.println(" %");
+        Serial.print("Cost difference: "); Serial.print(diffC); Serial.println(" %");
+
+        if (diffC >= 10)
+          Serial.println("Status: HIGHER CONSUMPTION");
+        else
+          Serial.println("Status: GOOD CONSUMPTION");
+      }
+    }
+
+    periodIndex++;
+
+    // ===== NEW YEAR =====
+    if (periodIndex == 4)
+    {
+      Serial.println("\n===========================================");
+      Serial.println("************ NEW YEAR ************");
+      Serial.println("===========================================\n");
+
+      periodIndex = 0;
+      year++;
+    }
+
+    lastPeriod = millis();
+  }
+}
