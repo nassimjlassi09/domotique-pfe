@@ -1,0 +1,70 @@
+#include <LiquidCrystal.h>   // Bibliothèque pour contrôler l'écran LCD
+#include <DHT.h>             // Bibliothèque pour le capteur DHT11
+
+// Configuration des broches du LCD
+LiquidCrystal lcd(13, 12, 6, 5, 4, 3);// RS=13, E=12, D4=6, D5=5, D6=4, D7=3
+
+#define DHTPIN A0
+#define DHTTYPE DHT11
+
+// Création de l'objet DHT
+DHT dht(DHTPIN, DHTTYPE);
+
+// Variables pour stocker les anciennes valeurs Elles servent à éviter de répéter les mêmes données
+float lastT = -100;
+float lastH = -100;
+
+void setup()
+{
+  lcd.begin(20, 4);
+  dht.begin();
+  Serial.begin(9600);
+  lcd.setCursor(0, 0);
+  lcd.print("DHT11 SENSOR");
+  Serial.println("DHT11 SENSOR");
+  Serial.println();
+  delay(2000);
+  lcd.clear();
+}
+
+void loop()
+{
+  float H = dht.readHumidity();  // Lecture de l'humidité depuis le capteur
+  float T = dht.readTemperature();  // Lecture de la température depuis le capteur
+
+  // Vérification si les valeurs sont invalides
+  if (isnan(H) || isnan(T))
+  {
+    lcd.setCursor(0, 1);
+    lcd.print("Sensor Error");
+    Serial.println("Sensor Error");
+    delay(2000);
+    return;
+  }
+
+  // AFFICHAGE LCD
+  lcd.setCursor(0, 1);
+  lcd.print("Temperature: ");
+  lcd.print(T, 2);
+  lcd.print((char)223);
+  lcd.print("C   ");
+  lcd.setCursor(0, 2);
+  lcd.print("Humidity : ");
+  lcd.print(H, 2);
+  lcd.print("%   ");
+
+  // AFFICHAGE VIRTUAL TERMINAL
+  if (T != lastT || H != lastH) // Vérifier si les valeurs ont changé
+  {
+    Serial.print("Temperature: ");
+    Serial.print(T, 2);
+    Serial.println(" C");
+    Serial.print("Humidity   : ");
+    Serial.print(H, 2);
+    Serial.println(" %");
+    Serial.println("-------------------");
+    lastT = T;
+    lastH = H;
+  }
+  delay(2000);
+}
