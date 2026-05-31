@@ -1,0 +1,127 @@
+#include <LiquidCrystal.h>   // Bibliothèque pour contrôler l'écran LCD
+#include <SoftwareSerial.h>  // Bibliothèque pour la communication série avec le module GSM
+
+// Initialisation du LCD sur les broches (RS=2, EN=3, D4=4, D5=5, D6=6, D7=7)
+LiquidCrystal lcd(2, 3, 4, 5, 6, 7);
+
+const int sensorPin = A0;  // Broche du capteur de flamme
+const int buzzer    = 13;  // Broche du buzzer
+const int G_led     = 8;   // Broche de la LED verte
+const int R_led     = 9;   // Broche de la LED rouge
+
+int read_value = 0;  // Variable pour stocker la valeur lue par le capteur
+
+SoftwareSerial sim900(10, 11);
+
+// TX = Broche 10 (connectée au RXD du SIM900D), RX = Broche 11 (non utilisée)
+SoftwareSerial gsm(11, 10);
+
+const String PHONE_NUMBER = "+1234567890";  // Numéro de téléphone pour recevoir les alertes
+bool smsSent = false;  // Variable pour éviter l'envoi de plusieurs SMS pour une même détection
+
+void setup() {
+  Serial.begin(9600);  // Démarrage de la communication série pour le débogage
+  Serial.println(F("=== Flame Detector with SIM900D (Blind Send) ==="));
+
+  gsm.begin(9600);     // Démarrage de la communication avec le module GSM
+
+  // Configuration des broches en entrée ou sortie
+  pinMode(sensorPin, INPUT);
+  pinMode(buzzer, OUTPUT);
+  pinMode(R_led, OUTPUT);
+  pinMode(G_led, OUTPUT);
+
+  // État initial du système : pas de danger
+  digitalWrite(buzzer, LOW); 
+  digitalWrite(R_led, LOW); 
+  digitalWrite(G_led, HIGH);  
+  // Initialisation du LCD
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("   WELCOME To   "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("  Fire Detector "));
+  delay(1000);
+  lcd.clear();
+
+  // Affichage de l'état d'initialisation du module GSM
+  Serial.println(F("Initializing SIM900D (blind mode)..."));
+  lcd.setCursor(0, 0);
+  lcd.print(F("GSM Init...     "));
+
+  initializeGSMBlind();  // Appel de la fonction d'initialisation du GSM
+
+  // Affichage de la confirmation que le GSM est prêt
+  lcd.setCursor(0, 1);
+  lcd.print(F("GSM Ready(Blind)"));
+  Serial.println(F("GSM Ready (Blind). Check Virtual Terminal 2 for responses."));
+  delay(1000);
+  lcd.clear();
+}
+
+void loop() {
+  // Lecture continue de la valeur du capteur de flamme
+  read_value = digitalRead(sensorPin);
+
+  if (read_value == 0) {
+    // Cas 1 : Aucune flamme détectée - état normal
+    lcd.setCursor(0, 0);
+    lcd.print(F("   Not  Flame   "));
+    lcd.setCursor(0, 1);
+    lcd.print(F(".....Normal....."));
+    digitalWrite(buzzer, LOW);   // Buzzer éteint
+    digitalWrite(R_led, LOW);    // LED rouge éteinte
+    digitalWrite(G_led, HIGH);   // LED verte allumée
+    smsSent = false;             // Réinitialisation pour permettre un futur envoi de SMS
+
+  } else {
+    // Cas 2 : Flamme détectée - état d'alerte
+    lcd.setCursor(0, 0);
+    lcd.print(F("Fire is Detected"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Alert....!!!    "));
+    digitalWrite(buzzer, HIGH);  // Buzzer activé pour alerter les personnes présentes
+    digitalWrite(R_led, HIGH);   // LED rouge allumée pour signaler le danger
+    digitalWrite(G_led, LOW);    // LED verte éteinte
+
+    if (!smsSent) {
+      // Envoi d'un SMS d'alerte une seule fois par détection
+      Serial.println(F("!!! FLAME DETECTED !!!"));
+      lcd.setCursor(0, 1);
+      lcd.print(F("Sending SMS...  "));
+      sendSMSAlertBlind();        // Appel de la fonction d'envoi du SMS
+      Serial.println(F("SMS sequence sent. Verify on Virtual Terminal 2."));
+      lcd.setCursor(0, 1);
+      lcd.print(F("SMS Sent!       "));
+      smsSent = true;             // SMS envoyé, on ne renvoie pas jusqu'à la prochaine détection
+      delay(1000);
+    }
+    delay(1000);
+  }
+  delay(100);  // Délai entre chaque lecture du capteur
+}
+
+void initializeGSMBlind() {
+  delay(1000);                  // Attente du démarrage du module GSM
+  gsm.println("AT");            // Commande AT pour vérifier la communication avec le module
+  delay(1000);
+  gsm.println("ATE0");          // Désactivation de l'écho pour simplifier les échanges
+  delay(500);
+  gsm.println("AT+CMGF=1");    // Configuration du mode texte pour l'envoi des SMS
+  delay(500);
+}
+
+void sendSMSAlertBlind() {
+  gsm.println("AT+CMGF=1");    // Confirmation du mode texte
+  delay(500);
+  gsm.print("AT+CMGS=\"");     // Commande pour spécifier le numéro destinataire
+  gsm.print(PHONE_NUMBER);
+  gsm.println("\"");
+  delay(500);                   // Attente du symbole '>' indiquant que le module est prêt
+  gsm.print("Alert! Flame detected by your fire alarm system.");  // Corps du message d'alerte
+  delay(500);
+  gsm.write(26);                // Envoi du caractère Ctrl+Z (ASCII 26) pour terminer et envoyer le SMS
+  delay(1000);                  // Attente de la confirmation d'envoi
+  Serial.println(F("-> SMS command sequence finished."));
+}
