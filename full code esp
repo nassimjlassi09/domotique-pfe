@@ -1,0 +1,474 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+// ═══════════════════════════════════════════
+// WIFI & MQTT
+// ═══════════════════════════════════════════
+#define WIFI_SSID     "TOPNET_D5E0"
+#define WIFI_PASSWORD "valorant1919"
+
+#define MQTT_BROKER "broker.hivemq.com"
+#define MQTT_PORT   1883
+#define MQTT_CLIENT "ESP32_MyDevice"
+
+// ═══════════════════════════════════════════
+// MQTT TOPICS
+// ═══════════════════════════════════════════
+#define TOPIC_LED          "myesp32/led"
+#define TOPIC_FAN          "myesp32/fan"
+#define TOPIC_TEMP_ROOM    "myesp32/temperature"
+#define TOPIC_HUM_ROOM     "myesp32/humidity"
+#define TOPIC_TEMP_FRIDGE  "myesp32/fridge/temperature"
+#define TOPIC_HUM_FRIDGE   "myesp32/fridge/humidity"
+#define TOPIC_FRIDGE_STATUS "myesp32/fridge/status"
+#define TOPIC_FLAME        "myesp32/flame"
+#define TOPIC_GAS          "myesp32/gas"
+#define TOPIC_PIR          "myesp32/motion"
+
+// ═══════════════════════════════════════════
+// TELEGRAM
+// ═══════════════════════════════════════════
+#define BOT_TOKEN "8881187772:AAE-kbksnV2MfsFlTc84Zls8dH7JYsa3UVE"
+#define CHAT_ID   "6240245691"
+
+// ═══════════════════════════════════════════
+// LIMITS
+// ═══════════════════════════════════════════
+#define ROOM_TEMP_LIMIT  35
+#define FRIDGE_TEMP_MAX  8
+#define FRIDGE_TEMP_MIN  4
+
+// ═══════════════════════════════════════════
+// FRIDGE TEMPERATURE OFFSET
+// Room temperature: 28°C
+// Desired normal temp: 6°C (middle of 4-8°C range)
+// Offset = Desired - Actual = 6 - 28 = -22
+// ═══════════════════════════════════════════
+#define FRIDGE_TEMP_OFFSET  -22.0
+
+// ═══════════════════════════════════════════
+// GAS SENSOR CALIBRATION
+// ═══════════════════════════════════════════
+#define GAS_PIN          35
+int gasBaseline = 0;           // Will store normal air value
+bool gasCalibrated = false;
+
+// ═══════════════════════════════════════════
+// PIR MOTION SENSOR SETTINGS
+// ═══════════════════════════════════════════
+#define PIR_PIN         14
+#define TOILET_LED_PIN  26
+#define PIR_HOLD_TIME   10000     // LED stays on for 10 seconds after LAST motion
+
+// ═══════════════════════════════════════════
+// PINS
+// ═══════════════════════════════════════════
+#define LED_PIN        2
+#define FAN_PIN        25
+#define DHT_PIN_ROOM   4
+#define DHT_PIN_FRIDGE 15
+#define FLAME_PIN      34
+#define DHT_TYPE       DHT11
+
+// ═══════════════════════════════════════════
+// OBJECTS
+// ═══════════════════════════════════════════
+DHT dhtRoom(DHT_PIN_ROOM, DHT_TYPE);
+DHT dhtFridge(DHT_PIN_FRIDGE, DHT_TYPE);
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// ═══════════════════════════════════════════
+// ALERT FLAGS
+// ═══════════════════════════════════════════
+bool roomAlertSent    = false;
+bool fridgeAlertSent  = false;
+bool flameAlertSent   = false;
+bool gasAlertSent     = false;
+
+// ═══════════════════════════════════════════
+// PIR MOTION VARIABLES
+// ═══════════════════════════════════════════
+bool motionDetected  = false;
+bool toiletLEDState  = false;
+unsigned long motionStartTime = 0;
+
+// ═══════════════════════════════════════════
+// TELEGRAM SENDER
+// ═══════════════════════════════════════════
+void sendTelegram(String message) {
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + String(BOT_TOKEN) +
+               "/sendMessage?chat_id=" + String(CHAT_ID) +
+               "&text=" + message;
+  http.begin(secureClient, url);
+  int httpCode = http.GET();
+  Serial.println("Telegram HTTP Code: " + String(httpCode));
+  http.end();
+}
+
+// ═══════════════════════════════════════════
+// GAS SENSOR CALIBRATION FUNCTION
+// ═══════════════════════════════════════════
+void calibrateGasSensor() {
+  Serial.println("\n═══════════════════════════════════════");
+  Serial.println("CALIBRATING MQ-2 GAS SENSOR");
+  Serial.println("Make sure you are in CLEAN AIR");
+  Serial.println("═══════════════════════════════════════");
+  
+  // Warm up the sensor (60 seconds for MQ-2)
+  Serial.println("Warming up sensor for 60 seconds...");
+  for (int i = 60; i > 0; i--) {
+    delay(1000);
+    if (i % 10 == 0) Serial.print(String(i) + "s... ");
+  }
+  Serial.println(" Done!");
+  
+  // Take multiple readings to establish baseline
+  long total = 0;
+  int readings = 50;
+  Serial.println("Taking baseline readings...");
+  
+  for (int i = 0; i < readings; i++) {
+    total += analogRead(GAS_PIN);
+    delay(100);
+    if (i % 10 == 0) Serial.print(".");
+  }
+  
+  gasBaseline = total / readings;
+  Serial.println("\n Calibration complete!");
+  Serial.print("Gas sensor baseline: ");
+  Serial.print(gasBaseline);
+  Serial.println(" (normal air value)");
+  Serial.print("Alert threshold: ");
+  Serial.println(gasBaseline + 150);
+  Serial.println("(Will trigger when value exceeds baseline + 150)");
+  Serial.println("═══════════════════════════════════════\n");
+  
+  gasCalibrated = true;
+}
+
+// ═══════════════════════════════════════════
+// MQTT CALLBACK
+// ═══════════════════════════════════════════
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+  if (String(topic) == TOPIC_LED) {
+    digitalWrite(LED_PIN, message == "ON" ? HIGH : LOW);
+    Serial.println("LED: " + message);
+  }
+
+  if (String(topic) == TOPIC_FAN) {
+    if (message == "ON") {
+      analogWrite(FAN_PIN, 255);
+      Serial.println("Fan ON");
+    } else {
+      analogWrite(FAN_PIN, 0);
+      Serial.println("Fan OFF");
+    }
+  }
+}
+
+// ═══════════════════════════════════════════
+// WIFI CONNECT
+// ═══════════════════════════════════════════
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" Connected!");
+}
+
+// ═══════════════════════════════════════════
+// MQTT CONNECT
+// ═══════════════════════════════════════════
+void connectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Connecting to MQTT...");
+    if (client.connect(MQTT_CLIENT)) {
+      Serial.println(" Connected!");
+      client.subscribe(TOPIC_LED);
+      client.subscribe(TOPIC_FAN);
+    } else {
+      Serial.println(" Failed! Retrying...");
+      delay(2000);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════
+// SETUP
+// ═══════════════════════════════════════════
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN,         OUTPUT);
+  pinMode(FAN_PIN,         OUTPUT);
+  pinMode(FLAME_PIN,       INPUT);
+  pinMode(GAS_PIN,         INPUT);
+  pinMode(PIR_PIN,         INPUT);
+  pinMode(TOILET_LED_PIN,  OUTPUT);
+
+  dhtRoom.begin();
+  dhtFridge.begin();
+
+  digitalWrite(TOILET_LED_PIN, LOW);
+
+  Serial.println("═══════════════════════════════════════");
+  Serial.println("   ESP32 MONITORING SYSTEM");
+  Serial.println("═══════════════════════════════════════");
+  Serial.println("✓ Flame sensor      : Instant response");
+  Serial.println("✓ Gas sensor        : Auto-calibrating MQ-2");
+  Serial.println("✓ PIR Motion Sensor : Active (stays ON with continuous motion)");
+  Serial.println("✓ Toilet LED        : ON during motion + 10s after last motion");
+  Serial.println("✓ Fridge offset     : " + String(FRIDGE_TEMP_OFFSET) + " °C");
+  Serial.println("  (28°C room → 6°C displayed)");
+  Serial.println("═══════════════════════════════════════\n");
+
+  delay(2000);
+
+  Serial.println("Warming up PIR sensor (30 seconds)...");
+  for (int i = 0; i < 30; i++) {
+    delay(1000);
+    if (i % 5 == 0) Serial.print(".");
+  }
+  Serial.println(" PIR Ready!\n");
+
+  connectWiFi();
+  client.setServer(MQTT_BROKER, MQTT_PORT);
+  client.setCallback(callback);
+  connectMQTT();
+
+  // Calibrate gas sensor
+  calibrateGasSensor();
+
+  Serial.println("\nSystem Ready!\n");
+}
+
+// ═══════════════════════════════════════════
+// LOOP
+// ═══════════════════════════════════════════
+void loop() {
+  if (!client.connected()) {
+    connectMQTT();
+  }
+  client.loop();
+
+  // ───────────────────────────
+  // PIR MOTION SENSOR - IMPROVED (LED stays on with continuous movement)
+  // ───────────────────────────
+  int motionValue = digitalRead(PIR_PIN);
+
+  // When motion is detected and LED is not already on
+  if (motionValue == HIGH && !motionDetected) {
+    motionDetected = true;
+    motionStartTime = millis();  // Reset timer
+    
+    digitalWrite(TOILET_LED_PIN, HIGH);
+    toiletLEDState = true;
+    
+    Serial.println("═══════════════════════════════════════");
+    Serial.println("MOTION DETECTED IN TOILET");
+    Serial.println("Toilet LED ON");
+    Serial.println("═══════════════════════════════════════");
+    
+    client.publish(TOPIC_PIR, "MOTION_DETECTED");
+  }
+  
+  // If motion is still present, keep resetting the timer
+  if (motionValue == HIGH && motionDetected) {
+    // Reset the timer every time motion is still detected
+    motionStartTime = millis();
+  }
+  
+  // Only turn off LED if motion has been absent for PIR_HOLD_TIME
+  if (motionValue == LOW && motionDetected && toiletLEDState) {
+    if (millis() - motionStartTime >= PIR_HOLD_TIME) {
+      digitalWrite(TOILET_LED_PIN, LOW);
+      toiletLEDState = false;
+      motionDetected = false;
+      
+      Serial.println("═══════════════════════════════════════");
+      Serial.println("No motion for 10 seconds - Toilet LED OFF");
+      Serial.println("═══════════════════════════════════════");
+      
+      client.publish(TOPIC_PIR, "NO_MOTION");
+    }
+  }
+
+  // ───────────────────────────
+  // TIMED SENSOR READINGS (every 3 seconds)
+  // ───────────────────────────
+  static unsigned long lastTime = 0;
+  if (millis() - lastTime > 3000) {
+    lastTime = millis();
+
+    // ───────────────────────────
+    // ROOM DHT11
+    // ───────────────────────────
+    float tempRoom = dhtRoom.readTemperature();
+    float humRoom  = dhtRoom.readHumidity();
+
+    if (!isnan(tempRoom) && !isnan(humRoom)) {
+      char tempStr[10], humStr[10];
+      dtostrf(tempRoom, 4, 1, tempStr);
+      dtostrf(humRoom,  4, 1, humStr);
+      client.publish(TOPIC_TEMP_ROOM, tempStr);
+      client.publish(TOPIC_HUM_ROOM,  humStr);
+
+      if (tempRoom > ROOM_TEMP_LIMIT && !roomAlertSent) {
+        String msg = "%F0%9F%9A%A8%20ALERTE%20CRITIQUE%0A"
+                     "Zone%20%3A%20Salle%20des%20machines%0A"
+                     "Temperature%20detectee%20%3A%20" + String(tempRoom) + "%20%C2%B0C%0A"
+                     "Seuil%20autorise%20%3A%2035%20%C2%B0C%0A"
+                     "Action%20requise%20%3A%20Intervention%20immediate%20requise%20par%20le%20responsable%20technique.";
+        sendTelegram(msg);
+        roomAlertSent = true;
+      }
+      if (tempRoom <= ROOM_TEMP_LIMIT) {
+        roomAlertSent = false;
+      }
+    }
+
+    // ───────────────────────────
+    // FRIDGE DHT11 — WITH OFFSET -22
+    // ───────────────────────────
+    float rawFridge  = dhtFridge.readTemperature();
+    float humFridge  = dhtFridge.readHumidity();
+    float tempFridge = rawFridge + FRIDGE_TEMP_OFFSET;
+
+    if (!isnan(rawFridge) && !isnan(humFridge)) {
+      char tempFStr[10], humFStr[10];
+      dtostrf(tempFridge, 4, 1, tempFStr);
+      dtostrf(humFridge,  4, 1, humFStr);
+      client.publish(TOPIC_TEMP_FRIDGE, tempFStr);
+      client.publish(TOPIC_HUM_FRIDGE,  humFStr);
+      
+      // Send status for multi-state indicator
+      if (tempFridge >= FRIDGE_TEMP_MIN && tempFridge <= FRIDGE_TEMP_MAX) {
+        client.publish(TOPIC_FRIDGE_STATUS, "NORMAL");
+      } else if (tempFridge > FRIDGE_TEMP_MAX) {
+        client.publish(TOPIC_FRIDGE_STATUS, "TOO HOT");
+      } else {
+        client.publish(TOPIC_FRIDGE_STATUS, "TOO COLD");
+      }
+
+      if (tempFridge >= FRIDGE_TEMP_MIN && tempFridge <= FRIDGE_TEMP_MAX) {
+        fridgeAlertSent = false;
+      }
+
+      if ((tempFridge > FRIDGE_TEMP_MAX || tempFridge < FRIDGE_TEMP_MIN) && !fridgeAlertSent) {
+        String reason = (tempFridge > FRIDGE_TEMP_MAX) ?
+                        "Temperature%20trop%20ELEVEE" :
+                        "Temperature%20trop%20BASSE";
+        String msg = "%F0%9F%9A%A8%20ALERTE%20CRITIQUE%20-%20REFRIGERATEUR%0A"
+                     "Zone%20%3A%20Stockage%20des%20cremes%20de%20fabrication%0A"
+                     "Temperature%20detectee%20%3A%20" + String(tempFridge) + "%20%C2%B0C%0A"
+                     "Anomalie%20%3A%20" + reason + "%0A"
+                     "Seuil%20normal%20%3A%204%C2%B0C%20-%208%C2%B0C%0A"
+                     "Action%20requise%20%3A%20Verifier%20immediatement%20le%20refrigerateur%21%0A"
+                     "Les%20cremes%20risquent%20d%27etre%20endommagees.";
+        sendTelegram(msg);
+        fridgeAlertSent = true;
+      }
+    }
+
+    // ───────────────────────────
+    // FLAME SENSOR
+    // ───────────────────────────
+    int flameDetected = digitalRead(FLAME_PIN);
+
+    if (flameDetected == LOW) {
+      client.publish(TOPIC_FLAME, "FIRE DETECTED");
+
+      if (!flameAlertSent) {
+        // ✅ SEUL CE MESSAGE A ÉTÉ MODIFIÉ (numéros tunisiens 198 et 190)
+        String msg = "%F0%9F%94%A5%20%F0%9F%94%A5%20ALERTE%20INCENDIE%20%F0%9F%94%A5%20%F0%9F%94%A5%0A"
+                     "Zone%20%3A%20Salle%20des%20machines%0A"
+                     "Anomalie%20%3A%20Flamme%20detectee%20par%20le%20capteur%20IR%0A"
+                     "Action%20requise%20%3A%20Evacuer%20immediatement%20et%20contacter%20les%20secours%21%0A"
+                     "%F0%9F%9A%92%20Appelez%20les%20pompiers%20au%20**198**%20ou%20les%20secours%20au%20**190**%20immediatement.";
+        sendTelegram(msg);
+        flameAlertSent = true;
+      }
+    } else {
+      client.publish(TOPIC_FLAME, "NO FIRE");
+      flameAlertSent = false;
+    }
+
+    // ───────────────────────────
+    // GAS SENSOR - WITH CALIBRATION
+    // ───────────────────────────
+    int gasValue = analogRead(GAS_PIN);
+    
+    // Calculate dynamic threshold based on baseline
+    int dynamicThreshold = gasBaseline + 150;  // Alert when 150 above baseline
+    
+    char gasStr[10];
+    dtostrf(gasValue, 4, 0, gasStr);
+    client.publish(TOPIC_GAS, gasStr);
+    
+    // Debug output every 20 readings
+    static int gasDebugCount = 0;
+    if (gasDebugCount++ > 20) {
+      gasDebugCount = 0;
+      Serial.print("Gas - Raw: ");
+      Serial.print(gasValue);
+      Serial.print(" | Baseline: ");
+      Serial.print(gasBaseline);
+      Serial.print(" | Threshold: ");
+      Serial.print(dynamicThreshold);
+      Serial.print(" | Status: ");
+      if (gasValue > dynamicThreshold) {
+        Serial.println("⚠️ GAS LEAK!");
+      } else {
+        Serial.println("Normal");
+      }
+    }
+    
+    if (gasValue > dynamicThreshold) {
+      client.publish(TOPIC_GAS, "GAS LEAK");
+
+      if (!gasAlertSent) {
+        String msg = "%F0%9F%9A%A8%F0%9F%92%A2%20ALERTE%20GAZ%20/%20FUMEE%20%F0%9F%92%A2%F0%9F%9A%A8%0A"
+                     "Zone%20%3A%20Salle%20des%20machines%0A"
+                     "Niveau%20detecte%20%3A%20" + String(gasValue) + "%0A"
+                     "Seuil%20d'alerte%20%3A%20" + String(dynamicThreshold) + "%0A"
+                     "Action%20requise%20%3A%20Verifier%20la%20source%20(gaz%20ou%20fumee)%20et%20ventiler%20immediatement.";
+        sendTelegram(msg);
+        gasAlertSent = true;
+      }
+    } else {
+      client.publish(TOPIC_GAS, "NO GAS");
+      gasAlertSent = false;
+    }
+
+    // ───────────────────────────
+    // SERIAL STATUS LINE
+    // ───────────────────────────
+    Serial.println();
+    Serial.print("Room: " + String(tempRoom) + "°C | ");
+    Serial.print("Fridge: " + String(tempFridge) + "°C (raw: " + String(rawFridge) + "°C) | ");
+    Serial.print("Flame: " + String(flameDetected == LOW ? "FIRE" : "OK") + " | ");
+    Serial.print("Gas: " + String(gasValue));
+    if (gasValue > (gasBaseline + 150)) Serial.print(" ⚠️ LEAK!");
+    Serial.print(" | Motion: ");
+    Serial.print(motionDetected ? "DETECTED" : "None");
+    Serial.print(" | Toilet LED: ");
+    Serial.println(toiletLEDState ? "ON" : "OFF");
+    Serial.println("─────────────────────────────────────────────────");
+  }
+}
