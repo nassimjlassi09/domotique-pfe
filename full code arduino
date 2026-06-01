@@ -1,0 +1,156 @@
+#include <SPI.h>      // Bibliothèque de communication SPI pour le lecteur RFID
+#include <MFRC522.h>  // Bibliothèque pour le lecteur RFID MFRC522
+#include <Servo.h>    // Bibliothèque pour contrôler le servomoteur (serrure de porte)
+#include <Keypad.h>   // Bibliothèque pour lire les entrées du clavier
+
+#define SS_PIN 10
+#define RST_PIN 9
+#define BUZZER_PIN A2
+
+// Création des objets RFID et servomoteur
+MFRC522 rfid(SS_PIN, RST_PIN);
+Servo myServo;
+
+// UID de la carte RFID autorisée
+byte authorizedUID[4] = {0x72, 0xD2, 0xBA, 0x03};
+
+// Dimensions du clavier : 4 lignes et 3 colonnes
+const byte ROWS = 4;
+const byte COLS = 3;
+// Disposition des touches sur le clavier
+char keys[ROWS][COLS] = {
+  {'1', '2', '3'},
+  {'4', '5', '6'},
+  {'7', '8', '9'},
+  {'*', '0', '#'}
+};
+// Broches Arduino connectées aux lignes et colonnes du clavier
+byte rowPins[ROWS] = {8, 7, 6, 5};
+byte colPins[COLS] = {4, 2, A1};
+
+// Initialisation du clavier avec sa disposition et sa configuration de broches
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+String enteredPassword = "";// Stocke les chiffres tapés par l'utilisateur
+String correctPassword = "1234";
+
+// Émet 3 bips sur le buzzer pour signaler un accès refusé
+void buzz() {
+  tone(BUZZER_PIN, 500, 400);
+  delay(500);
+  tone(BUZZER_PIN, 500, 400);
+  delay(500);
+  tone(BUZZER_PIN, 500, 400);
+  delay(500);
+  rfid.PCD_Init(); // Redémarrage du lecteur RFID après le délai du buzzer
+}
+
+void setup() {
+  Serial.begin(9600);
+  // Configure la broche du buzzer en sortie et s'assure qu'il démarre silencieux
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  // Démarrage du bus SPI et initialisation du lecteur RFID
+  SPI.begin();
+  rfid.PCD_Init();
+  // Attache le servomoteur à la broche 3 et le place en position verrouillée (0 degrés)
+  myServo.attach(3);
+  myServo.write(0);
+
+  Serial.println("═══════════════════════════════════════");
+  Serial.println("   CONTROLE D'ACCES RFID + CLAVIER");
+  Serial.println("═══════════════════════════════════════");
+  Serial.println("Options:");
+  Serial.println("1. Scanner votre carte RFID");
+  Serial.println("2. Entrer le code à 4 chiffres (1234)");
+  Serial.println("3. Appuyer sur * pour effacer");
+  Serial.println("═══════════════════════════════════════\n");
+}
+
+// Tourne le servomoteur pour ouvrir la porte, attend 3 secondes puis la referme
+void openDoor() {
+  Serial.println("✅ Accès Accordé - Ouverture de la porte!");
+  myServo.write(90); // Rotation du servomoteur en position ouverte
+  delay(3000);       // Maintien de la porte ouverte pendant 3 secondes
+  myServo.write(0);  // Rotation du servomoteur en position verrouillée
+  Serial.println("Porte Fermée\n");
+}
+
+// Vérifie si les 4 chiffres entrés correspondent au mot de passe correct
+void checkPassword() {
+  if (enteredPassword.length() == 4) {
+    if (enteredPassword == correctPassword) {
+      Serial.print("Mot de passe entré: ");
+      Serial.println(enteredPassword);
+      Serial.println("✅ Mot de passe correct!");
+      openDoor();
+    } else {
+      Serial.print("Mot de passe entré: ");
+      Serial.println(enteredPassword);
+      Serial.println("❌ Accès Refusé - Mauvais mot de passe!");
+      buzz(); // Déclenche le buzzer si le mot de passe est incorrect
+    }
+    enteredPassword = ""; // Réinitialise le mot de passe après chaque tentative
+  }
+}
+
+void loop() {
+  // Lecture de la touche appuyée sur le clavier
+  char key = keypad.getKey();
+  if (key) {
+    Serial.print("Touche appuyée: ");
+    Serial.println(key);
+
+    if (key == '*') {
+      // La touche étoile efface la saisie du mot de passe en cours
+      enteredPassword = "";
+      Serial.println("Saisie effacée!");
+    }
+    else if (key >= '0' && key <= '9') {
+      // Ajoute le chiffre au mot de passe si moins de 4 chiffres ont été saisis
+      if (enteredPassword.length() < 4) {
+        enteredPassword += key;
+        // Affiche la progression sous forme d'astérisques pour cacher les chiffres
+        Serial.print("Mot de passe actuel: ");
+        for(int i = 0; i < enteredPassword.length(); i++) {
+          Serial.print("*");
+        }
+        Serial.println();
+        checkPassword();// Vérifie automatiquement le mot de passe une fois 4 chiffres saisis
+      }
+    }
+  }
+
+  // Vérifie si une nouvelle carte RFID est présente près du lecteur
+  if (!rfid.PICC_IsNewCardPresent()) return;
+
+  // Tente de lire le numéro de série (UID) de la carte
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  // Affiche l'UID de la carte scannée sur le Moniteur Série
+  Serial.print("UID de la carte RFID: ");
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.print(rfid.uid.uidByte[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
+
+  // Compare l'UID scanné avec l'UID autorisé octet par octet
+  bool authorized = true;
+  for (byte i = 0; i < 4; i++) {
+    if (rfid.uid.uidByte[i] != authorizedUID[i]) {
+      authorized = false;
+    }
+  }
+
+  if (authorized) {
+    openDoor(); // Ouvre la porte si la carte est autorisée
+  } else {
+    Serial.println("❌ Accès Refusé - Carte non autorisée!");
+    buzz(); // Déclenche le buzzer si la carte n'est pas autorisée
+  }
+
+  // Arrête la communication avec la carte et attend avant le prochain scan
+  rfid.PICC_HaltA();
+  delay(1000);
+}
